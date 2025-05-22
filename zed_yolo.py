@@ -4,6 +4,10 @@ import time
 import numpy as np
 from collections import deque
 from ultralytics import YOLO
+import io
+import contextlib
+import os
+from datetime import datetime
 
 
 def init_zed():
@@ -29,13 +33,10 @@ def load_yolo_model(weights_path='yolo11n.pt', device='cuda'):
     return model
 
 
-def get_median_depth(depth_map, x1, y1, x2, y2):
+def get_depth_center_pattern(depth_map, x1, y1, x2, y2, delta=5):
     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    points = [
-        (x1, y1), ((x1 + x2)//2, y1), (x2, y1),
-        (x1, (y1 + y2)//2), (cx, cy), (x2, (y1 + y2)//2),
-        (x1, y2), ((x1 + x2)//2, y2), (x2, y2),
-    ]
+    offsets = [-delta, 0, delta]
+    points = [(cx + dx, cy + dy) for dx in offsets for dy in offsets]
 
     depths = []
     for px, py in points:
@@ -50,7 +51,7 @@ def get_median_depth(depth_map, x1, y1, x2, y2):
 def process_frame(frame, depth_map, results):
     for box in results.boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-        median_depth = get_median_depth(depth_map, x1, y1, x2, y2)
+        median_depth = get_depth_center_pattern(depth_map, x1, y1, x2, y2)
         label = f"{median_depth:.3f} m" if median_depth else "No depth"
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -58,33 +59,59 @@ def process_frame(frame, depth_map, results):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
 
+def make_logfile_path():
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs("log", exist_ok=True)
+    return f"log/{timestamp}.txt"
+
+
+# (위 생략)
+
 def main():
     zed, runtime, image, depth = init_zed()
     model = load_yolo_model()
     frame_times = deque(maxlen=30)
     prev_time = time.time()
 
-    while True:
-        current_time = time.time()
-        elapsed = current_time - prev_time
-        prev_time = current_time
-        frame_times.append(elapsed)
-        avg_fps = 1.0 / (sum(frame_times) / len(frame_times)) if frame_times else 0.0
+    log_path = make_logfile_path()
+    with open(log_path, "w") as log_file:
+        while True:
+            current_time = time.time()
+            elapsed = current_time - prev_time
+            prev_time = current_time
+            frame_times.append(elapsed)
+            avg_fps = 1.0 / (sum(frame_times) / len(frame_times)) if frame_times else 0.0
 
-        if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
-            zed.retrieve_image(image, sl.VIEW.LEFT)
-            zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
-            frame = image.get_data()
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+            if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+                zed.retrieve_image(image, sl.VIEW.LEFT)
+                zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
+                frame = image.get_data()
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
 
-            results = model(frame, device='cuda')[0]
-            process_frame(frame, depth, results)
+                # YOLO 실행 (로그 출력 제거)
+                results = model(frame, device='cuda', verbose=False)[0]
 
-            cv2.putText(frame, f"Avg FPS: {avg_fps:.2f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            cv2.imshow("ZED + YOLO Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                now_str = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
+                log_file.write(f"{now_str} FPS: {avg_fps:.2f}\n")
+                for box in results.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    cls_id = int(box.cls[0])
+                    label = results.names[cls_id]
+                    conf = float(box.conf[0])
+                    distance = get_depth_center_pattern(depth, x1, y1, x2, y2)
+                    distance_str = f"{distance:.3f} m" if distance else "No depth"
+                    log_file.write(f"{now_str} - {label} ({conf:.2f}) : {distance_str}\n")
+                log_file.write("\n")
+                log_file.flush()
+
+                # 화면 처리
+                process_frame(frame, depth, results)
+                cv2.putText(frame, f"Avg FPS: {avg_fps:.2f}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                cv2.imshow("ZED + YOLO Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
     zed.close()
 
