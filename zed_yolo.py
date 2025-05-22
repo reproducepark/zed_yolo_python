@@ -3,6 +3,7 @@ import cv2
 import time
 from collections import deque
 from ultralytics import YOLO
+import numpy as np
 
 # 1. ZED 카메라 초기화
 zed = sl.Camera()
@@ -18,7 +19,7 @@ runtime = sl.RuntimeParameters()
 image = sl.Mat()
 depth = sl.Mat()
 
-# 2. YOLOv8 모델 로드
+# 2. YOLO11 모델 로드
 model = YOLO('yolo11n.pt')  # 또는 사용자 정의 모델
 model.to('cuda')
 
@@ -50,20 +51,28 @@ while True:
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
-            status, depth_val_mm = depth.get_value(cx, cy)
-            if status == sl.ERROR_CODE.SUCCESS and depth_val_mm > 0:
-                depth_val_m = depth_val_mm / 1000.0
-                label = f"{depth_val_m:.3f} m"
+            points = [
+                (x1, y1), ((x1 + x2)//2, y1), (x2, y1),
+                (x1, (y1 + y2)//2), (cx, cy), (x2, (y1 + y2)//2),
+                (x1, y2), ((x1 + x2)//2, y2), (x2, y2),
+            ]
+
+            depths = []
+            for px, py in points:
+                if 0 <= px < depth.get_width() and 0 <= py < depth.get_height():
+                    status, depth_val_mm = depth.get_value(px, py)
+                    if status == sl.ERROR_CODE.SUCCESS and depth_val_mm > 0:
+                        depths.append(depth_val_mm / 1000.0)  # mm → m
+
+            if depths:
+                median_depth = np.median(depths)
+                label = f"{median_depth:.3f} m"
             else:
                 label = "No depth"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, label, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-
-        # 평균 FPS 표시
-        cv2.putText(frame, f"Avg FPS: {avg_fps:.2f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
         cv2.imshow("ZED + YOLO Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
