@@ -27,7 +27,7 @@ def init_zed():
     return zed, runtime, image, depth
 
 
-def load_yolo_model(weights_path='yolo11n.pt', device='cuda'):
+def load_yolo_model(weights_path='yolo11l.pt', device='cuda'):
     model = YOLO(weights_path)
     model.to(device)
     return model
@@ -49,9 +49,16 @@ def get_depth_center_pattern(depth_map, x1, y1, x2, y2, delta=5):
 
 
 def process_frame(frame, depth_map, results):
+    threshold = 1.0
     for box in results.boxes:
+        cls_id = int(box.cls[0])
+        if cls_id != 0:
+            continue
+        
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
         median_depth = get_depth_center_pattern(depth_map, x1, y1, x2, y2)
+        if median_depth < threshold:
+            print(f"Detected as {median_depth:.3f}")
         label = f"{median_depth:.3f} m" if median_depth else "No depth"
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -97,6 +104,8 @@ def main():
                 for box in results.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                     cls_id = int(box.cls[0])
+                    if cls_id != 0:
+                        continue
                     label = results.names[cls_id]
                     conf = float(box.conf[0])
                     distance = get_depth_center_pattern(depth, x1, y1, x2, y2)
